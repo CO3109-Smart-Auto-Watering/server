@@ -1,6 +1,7 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const { sendPasswordResetEmail } = require('../utils/email');
 const router = express.Router();
 
 // Middleware for protected routes
@@ -32,7 +33,7 @@ const authenticate = (req, res, next) => {
 // Login route
 router.post('/login', async (req, res) => {
   try {
-    const { username, password, role } = req.body;
+    const { username, password, email, role } = req.body;
 
     // Validate request
     if (!username || !password) {
@@ -99,7 +100,7 @@ router.post('/login', async (req, res) => {
 // Register route
 router.post('/register', async (req, res) => {
   try {
-    const { username, password, role } = req.body;
+    const { username, password, email, role } = req.body;
 
     // Check if user already exists
     const existingUser = await User.findOne({ username });
@@ -110,10 +111,28 @@ router.post('/register', async (req, res) => {
       });
     }
 
+    // Check if email is provided
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email là bắt buộc'
+      });
+    }
+
+     // Check if email already exists
+     const existingEmail = await User.findOne({ email });
+     if (existingEmail) {
+       return res.status(400).json({
+         success: false,
+         message: 'Email đã được sử dụng'
+       });
+     }
+     
     // Create new user
     const newUser = new User({
       username,
       password,
+      email,
       role: role || 'user'
     });
 
@@ -123,7 +142,8 @@ router.post('/register', async (req, res) => {
     const token = jwt.sign(
       { 
         id: newUser._id, 
-        username: newUser.username, 
+        username: newUser.username,
+        email: newUser.email,
         role: newUser.role 
       }, 
       process.env.JWT_SECRET || 'your_jwt_secret', 
@@ -137,6 +157,7 @@ router.post('/register', async (req, res) => {
       user: {
         id: newUser._id,
         username: newUser.username,
+        email: newUser.email,
         role: newUser.role
       }
     });
@@ -151,17 +172,27 @@ router.post('/register', async (req, res) => {
   }
 });
 
+// ...existing code...
+
 // Forgot password route
 router.post('/forgot-password', async (req, res) => {
   try {
-    const { username } = req.body;
+    const { email } = req.body;
     
-    // Find user
-    const user = await User.findOne({ username });
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Vui lòng cung cấp địa chỉ email'
+      });
+    }
+
+    // Find user by email
+    const user = await User.findOne({ email });
+
     if (!user) {
       return res.status(404).json({ 
         success: false, 
-        message: 'Không tìm thấy tài khoản với tên đăng nhập này' 
+        message: 'Không tìm thấy tài khoản với email này' 
       });
     }
     
@@ -172,12 +203,26 @@ router.post('/forgot-password', async (req, res) => {
       { expiresIn: '15m' }
     );
     
-    // In a real app, you would send an email with a reset link
-    // Here we're just returning the token for demonstration
+    // Store the token's hash in the database
+    user.resetPasswordToken = resetToken;
+    user.resetPasswordExpires = Date.now() + 15 * 60 * 1000; // 15 minutes
+    await user.save();
+    
+    // Send email with password reset link
+    const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password/${resetToken}`;
+    
+    const emailSent = await sendPasswordResetEmail(user.email, resetUrl, user.username);
+    
+    if (!emailSent) {
+      return res.status(500).json({
+        success: false,
+        message: 'Không thể gửi email đặt lại mật khẩu'
+      });
+    }
+    
     res.status(200).json({
       success: true,
-      message: 'Vui lòng kiểm tra email để đặt lại mật khẩu',
-      resetToken
+      message: 'Hướng dẫn đặt lại mật khẩu đã được gửi đến email của bạn'
     });
     
   } catch (error) {
@@ -190,28 +235,97 @@ router.post('/forgot-password', async (req, res) => {
   }
 });
 
-// Reset password route
-router.post('/reset-password', async (req, res) => {
+// Validate reset token route
+router.get('/reset-password/validate/:token', async (req, res) => {
   try {
-    const { resetToken, newPassword } = req.body;
+    const { token } = req.params;
+    
+    // Thêm log chi tiết hơn
+    console.log('Validating reset token:', token);
+    
+    try {
+      // Verify token
+      const decoded = jwt.verify(
+        token, 
+        process.env.JWT_SECRET || 'your_jwt_secret'
+      );
+      
+      console.log('Token decoded successfully, user ID:', decoded.id);
+      
+      // Tìm người dùng với token và thời gian hết hạn
+      const user = await User.findOne({
+        _id: decoded.id,
+        resetPasswordToken: token,
+        resetPasswordExpires: { $gt: Date.now() }
+      });
+      
+      console.log('User found:', user ? 'Yes' : 'No');
+      
+      if (!user) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Token không hợp lệ hoặc đã hết hạn' 
+        });
+      }
+      
+      res.status(200).json({ 
+        success: true,
+        message: 'Token hợp lệ' 
+      });
+    } catch (jwtError) {
+      console.error('JWT verification error:', jwtError);
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Token không hợp lệ' 
+      });
+    }
+    
+  } catch (error) {
+    console.error('Validate token error:', error);
+    res.status(400).json({ 
+      success: false, 
+      message: 'Token không hợp lệ hoặc đã hết hạn' 
+    });
+  }
+});
+
+// Reset password route (updated to use URL params)
+router.post('/reset-password/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+    const { password } = req.body;
+    
+    if (!password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Mật khẩu mới là bắt buộc'
+      });
+    }
     
     // Verify token
     const decoded = jwt.verify(
-      resetToken, 
+      token, 
       process.env.JWT_SECRET || 'your_jwt_secret'
     );
     
-    // Find user
-    const user = await User.findById(decoded.id);
+    // Find user with valid token
+    const user = await User.findOne({
+      _id: decoded.id,
+      resetPasswordToken: token,
+      resetPasswordExpires: { $gt: Date.now() }
+    });
+    
     if (!user) {
-      return res.status(404).json({ 
+      return res.status(400).json({ 
         success: false, 
-        message: 'Người dùng không tồn tại hoặc token không hợp lệ' 
+        message: 'Token không hợp lệ hoặc đã hết hạn' 
       });
     }
     
     // Update password
-    user.password = newPassword; // This will be hashed by the pre-save hook
+    user.password = password; // This will be hashed by the pre-save hook
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
     await user.save();
     
     res.status(200).json({
@@ -228,6 +342,8 @@ router.post('/reset-password', async (req, res) => {
     });
   }
 });
+
+
 
 // Get current user route
 router.get('/user', authenticate, async (req, res) => {
