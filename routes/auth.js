@@ -29,6 +29,10 @@ const authenticate = (req, res, next) => {
     });
   }
 };
+// Logout
+router.post("/logout", async (req, res) => {
+  res.status(200).json({ message: "Logged out successfully" });
+});
 
 // Login route
 router.post('/login', async (req, res) => {
