@@ -8,6 +8,7 @@ const fetchDataAndStore = require("./utils/cronJob");
 
 // Import routes
 const authRoutes = require('./routes/auth');
+const userRoutes = require('./routes/userRoutes');
 
 // Initialize Express app
 const app = express();
@@ -24,6 +25,7 @@ mongoose.connect(process.env.MONGO_URI)
 
 // Use Routes
 app.use('/api', authRoutes);
+app.use("/api/users", userRoutes);
 
 // Start server
 app.listen(PORT, () => {
