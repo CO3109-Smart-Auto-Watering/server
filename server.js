@@ -4,12 +4,10 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 require("dotenv").config();
 
+const fetchDataAndStore = require("./utils/cronJob");
 
 // Import routes
 const authRoutes = require('./routes/auth');
-// const feedRoutes = require("./routes/feedRoutes");
-const fetchDataAndStore = require("./utils/cronJob");
-// const scheduleDataFetch = require("./utils/cronJob");
 
 // Initialize Express app
 const app = express();

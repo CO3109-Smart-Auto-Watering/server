@@ -25,14 +25,21 @@ const fetchDataAndStore = async () => {
         // Get dynamic model based on feed name
         const FeedModel = getFeedModel(feed);
 
-        // Store data in corresponding collection
-        await FeedModel.create({
-          feed_id: feedData.feed_id,
-          value: feedData.value,
-          created_at: feedData.created_at,
-        });
+        // Check for duplicate entry
+        const existingEntry = await FeedModel.findOne({ created_at: feedData.created_at });
 
-        console.log(`Data saved for ${feed}: ${feedData.value} at ${feedData.created_at}`);
+        if (!existingEntry) {
+          // Store data in corresponding collection
+          await FeedModel.create({
+            feed_id: feedData.feed_id,
+            value: feedData.value,
+            created_at: feedData.created_at,
+          });
+
+          console.log(`Data saved for ${feed}: ${feedData.value} at ${feedData.created_at}`);
+        } else {
+          console.log(`Duplicate entry detected for ${feed} at ${feedData.created_at}, skipping...`);
+        }
       }
     }
   } catch (error) {
@@ -40,8 +47,8 @@ const fetchDataAndStore = async () => {
   }
 };
 
-// Schedule the cron job (every minute)
-cron.schedule('*/2 * * * *', async () => {
+// Schedule the cron job (every 2 minutes)
+cron.schedule("*/2 * * * *", async () => {
   console.log("Fetching Adafruit IO data...");
   await fetchDataAndStore();
 });
