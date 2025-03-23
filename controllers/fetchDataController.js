@@ -6,7 +6,7 @@ const getFeedModel = require("../models/FeedModel");
 
 const AIO_USERNAME = process.env.AIO_USERNAME;  
 const AIO_KEY = process.env.AIO_KEY; 
-const FEED_NAMES = ["humidity", "soil-humidity", "temperature"]; // List of feed names
+const FEED_NAMES = ["sensor-humidity", "sensor-soil", "sensor-temp"]; // List of feed names
 
 const fetchData = async () => {
   try {

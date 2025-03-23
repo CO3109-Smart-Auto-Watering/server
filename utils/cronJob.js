@@ -7,7 +7,7 @@ const AIO_USERNAME = process.env.AIO_USERNAME;
 const AIO_KEY = process.env.AIO_KEY;
 
 // List of feeds to track
-const FEEDS = ["temperature", "humidity", "soil-moisture"]; // Add more feed names if needed
+const FEEDS = ["sensor-humidity", "sensor-soil", "sensor-temp"]; // Add more feed names if needed
 
 const fetchDataAndStore = async () => {
   try {
