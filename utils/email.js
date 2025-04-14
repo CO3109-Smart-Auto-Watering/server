@@ -15,9 +15,14 @@ const sendEmail = async options => {
     }
   });
 
+  // Get sender name and email address
+  const senderName = process.env.EMAIL_FROM_NAME || 'Dịch vụ tưới cây thông minh';
+  const senderEmail = process.env.EMAIL_FROM;
+  const fromField = `${senderName} <${senderEmail}>`;
+
   // 2) Define the email options
   const mailOptions = {
-    from: process.env.EMAIL_FROM || 'Học viện Công nghệ <noreply@hcmut.edu.vn>',
+    from: fromField,
     to: options.email,
     subject: options.subject,
     text: options.message,
