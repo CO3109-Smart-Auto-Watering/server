@@ -14,8 +14,8 @@ const activeJobs = {};
 const sendToAdafruit = async (value, deviceId) => {
   try {
     const url = `https://io.adafruit.com/api/v2/${AIO_USERNAME}/feeds/${SCHEDULE_FEED}/data`;
-    // Format dữ liệu với deviceId: value
-    const dataValue = `${deviceId}:${value}`;
+    // Format dữ liệu với value
+    const dataValue = `${value}`;
     
     await axios.post(
       url, 
@@ -36,6 +36,7 @@ const scheduleJob = (scheduleDoc) => {
   // Cancel any existing job for this schedule
   if (activeJobs[scheduleDoc._id]) {
     activeJobs[scheduleDoc._id].cancel();
+    delete activeJobs[scheduleDoc._id];
   }
   
   // Only schedule if active and not completed
@@ -48,18 +49,53 @@ const scheduleJob = (scheduleDoc) => {
   if (scheduleDoc.scheduleType === 'onetime') {
     // One-time specific date/time scheduling
     const scheduledDate = new Date(scheduleDoc.scheduledDateTime);
+    const now = new Date();
     
-    // Don't schedule if date is in the past
-    if (scheduledDate <= new Date()) {
-      console.log(`Schedule ${scheduleDoc._id} is in the past, marking as completed`);
-      Schedule.findByIdAndUpdate(
-        scheduleDoc._id, 
-        { isCompleted: true },
-        { new: true }
-      ).catch(err => console.error('Error updating schedule:', err));
+    // Check if the schedule was previously paused (has updatedAt and it's different from createdAt)
+    const wasPreviouslyPaused = 
+      scheduleDoc.updatedAt && 
+      new Date(scheduleDoc.updatedAt).getTime() > new Date(scheduleDoc.createdAt).getTime() + 1000; // 1 second buffer
+    
+    // Handle case when schedule date is in the past
+    if (scheduledDate <= now) {
+      if (wasPreviouslyPaused) {
+        // If it was paused and reactivated, execute immediately
+        console.log(`Schedule ${scheduleDoc._id} was paused and now reactivated, executing immediately`);
+        
+        (async () => {
+          console.log(`Executing reactivated one-time schedule: ${scheduleDoc.name}`);
+          
+          // Send ON signal (1) to the specific device with deviceId
+          await sendToAdafruit(1, scheduleDoc.deviceId);
+          
+          // Schedule turning OFF after duration minutes
+          setTimeout(async () => {
+            console.log(`Turning off pump for schedule: ${scheduleDoc.name}`);
+            await sendToAdafruit(0, scheduleDoc.deviceId);
+            
+            // Mark as completed after duration
+            await Schedule.findByIdAndUpdate(
+              scheduleDoc._id,
+              { isCompleted: true },
+              { new: true }
+            );
+          }, scheduleDoc.duration * 60 * 1000); // Convert minutes to milliseconds
+        })();
+      } else {
+        // If it's a new schedule with past time, just mark as completed without executing
+        console.log(`Schedule ${scheduleDoc._id} is in the past and not previously paused, marking as completed`);
+        
+        Schedule.findByIdAndUpdate(
+          scheduleDoc._id,
+          { isCompleted: true },
+          { new: true }
+        ).catch(err => console.error('Error updating schedule:', err));
+      }
+      
       return;
     }
     
+    // Normal scheduling for future dates
     console.log(`Scheduling one-time job for ${scheduledDate}, Device: ${scheduleDoc.deviceId}`);
     
     activeJobs[scheduleDoc._id] = schedule.scheduleJob(scheduledDate, async () => {
@@ -83,7 +119,7 @@ const scheduleJob = (scheduleDoc) => {
     });
     
   } else {
-    // Recurring weekly schedule
+    // Recurring weekly schedule (giữ nguyên như cũ)
     const [hours, minutes] = scheduleDoc.startTime.split(':').map(Number);
     
     // Create cron expression: mins hours * * dayOfWeek
@@ -311,8 +347,16 @@ const toggleSchedule = async (req, res) => {
       });
     }
     
+    // Lưu trạng thái cũ để biết đang chuyển từ trạng thái nào sang trạng thái nào
+    const previousState = schedule.isActive;
+    
+    // Toggle trạng thái
     schedule.isActive = !schedule.isActive;
     await schedule.save();
+    
+    // Gửi tín hiệu tới Adafruit dựa trên trạng thái mới
+    // Nếu kích hoạt (isActive = true) thì gửi 1, ngược lại gửi 0
+    await sendToAdafruit(schedule.isActive ? 1 : 0, schedule.deviceId);
     
     // Re-schedule or cancel job
     if (schedule.isActive) {

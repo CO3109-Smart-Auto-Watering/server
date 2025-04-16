@@ -49,8 +49,6 @@ const initMqttClient = () => {
   });
   
   // Handle incoming messages
-  // In your initMqttClient function, update the message handler:
-
   mqttClient.on('message', async (topic, message) => {
     try {
       // Extract feed name from topic (format: username/feeds/feedname)
@@ -59,42 +57,25 @@ const initMqttClient = () => {
       
       console.log(`MQTT: Received update from ${feedName}: ${value}`);
       
-      // Format là "deviceId:value" cho dữ liệu từ thiết bị
-      let deviceId = null;
-      let actualValue = value;
+      // Tìm thiết bị có feed này
+      const device = await Device.findOne({ feeds: { $in: [feedName] } });
       
-      // Kiểm tra xem giá trị có định dạng deviceId:value không
-      if (value.includes(':')) {
-        const parts = value.split(':');
-        deviceId = parts[0];
-        actualValue = parts[1];
-      }
-      
-      // Tìm thiết bị dựa vào deviceId hoặc feed type
-      let device;
-      if (deviceId) {
-        device = await Device.findOne({ deviceId });
-      }
-      
-      if (!device) {
-        device = await Device.findOne({ feeds: feedName });
-      }
-      
-      // Xác định loại feed
-      let feedType = feedName;
+      // Lấy deviceId từ database, không phải từ giá trị tin nhắn
+      const deviceId = device ? device.deviceId : 'unknown';
+      const userId = device ? device.userId : null;
       
       // Create feed model and save data
       const FeedModel = getFeedModel(feedName);
       await FeedModel.create({
-        userId: device ? device.userId : null,
-        deviceId: deviceId || (device ? device.deviceId : null),
-        value: actualValue,
-        feedType: feedType,
+        userId: userId,
+        deviceId: deviceId,
+        value: value, // Sử dụng giá trị trực tiếp
+        feedType: feedName,
         createdAt: new Date()
       });
       
-      const userInfo = device ? `for user ${device.userId}` : "(unassociated)";
-      console.log(`MQTT: Saved ${feedName} data ${userInfo} for device ${deviceId || 'unknown'} (value: ${actualValue})`);
+      const userInfo = userId ? `for user ${userId}` : "(unassociated)";
+      console.log(`MQTT: Saved ${feedName} data ${userInfo} for device ${deviceId} (value: ${value})`);
     } catch (error) {
       console.error('Error handling MQTT message:', error);
     }
@@ -552,6 +533,55 @@ const getLatestMoisture = async (req, res) => {
 };
 
 
+const getSingleFeedData = async (req, res) => {
+  try {
+    const { feedName } = req.params;
+    
+    // Lấy userId từ thông tin xác thực
+    const userId = req.user.id;
+    
+    // Kiểm tra feed name hợp lệ
+    const validFeeds = ['sensor-temp', 'sensor-humidity', 'sensor-soil', 'pump-motor', 'mode'];
+    if (!validFeeds.includes(feedName)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid feed name'
+      });
+    }
+    
+    // Sử dụng getFeedModel thay vì SensorData
+    const FeedModel = getFeedModel(feedName);
+    
+    // Lấy dữ liệu mới nhất của feed từ database
+    const data = await FeedModel.findOne({ 
+      userId 
+    }).sort({ createdAt: -1 }); // Sort theo createdAt không phải timestamp
+    
+    if (!data) {
+      return res.status(404).json({
+        success: false,
+        feedName: feedName,
+        message: 'No data found for this feed'
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      feedName,
+      value: data.value,
+      timestamp: data.createdAt // Trả về createdAt thay vì timestamp
+    });
+    
+  } catch (error) {
+    console.error('Error fetching feed data:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching feed data',
+      error: error.message
+    });
+  }
+};
+
 
 
 
@@ -562,5 +592,6 @@ module.exports = {
   sendCommand,          // Controller for /command route
   initMqttClient,          // Function to initialize MQTT client
   getHistoricalData,        // Controller for /history route
-  getDeviceData          // Controller for /device/:deviceId route
+  getDeviceData,          // Controller for /device/:deviceId route
+  getSingleFeedData      // Controller for /feed/:feedName route
 };
