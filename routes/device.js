@@ -11,7 +11,8 @@ const {
   getDeviceData,
   processDeviceData,
   getDevicesByArea,
-  getUnassignedDevices
+  getUnassignedDevices,
+  getDeviceAreaMapping
 } = require('../controllers/deviceController');
 const { authenticate } = require('../controllers/authController');
 
@@ -19,6 +20,9 @@ const { authenticate } = require('../controllers/authController');
 router.use(authenticate);
 router.post('/register', registerDevice);
 router.get('/', getUserDevices);
+router.get('/area/:areaId', getDevicesByArea);
+router.get('/unassigned', getUnassignedDevices);
+router.get('/area-mapping', getDeviceAreaMapping);
 router.get('/:deviceId', getDeviceById);
 router.put('/:deviceId', updateDevice);
 router.delete('/:deviceId', deleteDevice);
@@ -26,8 +30,6 @@ router.put('/:deviceId/toggle', toggleDeviceStatus);
 router.patch('/:deviceId/toggle', toggleDeviceStatus);
 router.post('/:deviceId/link-plant', linkDeviceToPlant);
 router.get('/:deviceId/data', getDeviceData);
-router.get('/area/:areaId', getDevicesByArea);
-router.get('/unassigned', getUnassignedDevices);
 
 
 // Tạo route riêng cho processDeviceData không yêu cầu xác thực

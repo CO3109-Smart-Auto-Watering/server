@@ -20,6 +20,7 @@ const AreaSchema = new mongoose.Schema({
     ref: 'Device'
   }],
   plants: [{
+    deviceId: String,
     name: {
       type: String,
       required: true

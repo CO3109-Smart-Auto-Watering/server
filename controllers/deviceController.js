@@ -35,6 +35,11 @@ const registerDevice = async (req, res) => {
           message: "Cây trồng không tồn tại trong khu vực này"
         });
       }
+      
+      // Thêm deviceId vào mảng devices của khu vực
+      await Area.findByIdAndUpdate(areaId, {
+        $addToSet: { devices: deviceId }
+      });
     }
     
     // Tạo thiết bị mới
@@ -137,6 +142,9 @@ const updateDevice = async (req, res) => {
       });
     }
     
+    // Lưu giá trị areaId cũ để kiểm tra sau này
+    const oldAreaId = device.areaId;
+    
     // Kiểm tra khu vực nếu có
     if (areaId !== undefined) {
       if (areaId) {
@@ -156,9 +164,26 @@ const updateDevice = async (req, res) => {
             message: "Cây trồng không tồn tại trong khu vực này"
           });
         }
+        
+        // Nếu thiết bị đã ở trong khu vực cũ, xóa deviceId khỏi khu vực cũ
+        if (oldAreaId && oldAreaId !== areaId) {
+          await Area.findByIdAndUpdate(oldAreaId, {
+            $pull: { devices: deviceId }
+          });
+        }
+        
+        // Thêm deviceId vào mảng devices của khu vực mới nếu chưa có
+        await Area.findByIdAndUpdate(areaId, {
+          $addToSet: { devices: deviceId }
+        });
+      } else if (oldAreaId) {
+        // Nếu areaId mới là null nhưng có areaId cũ, xóa khỏi khu vực cũ
+        await Area.findByIdAndUpdate(oldAreaId, {
+          $pull: { devices: deviceId }
+        });
       }
       
-      // Chỉ cập nhật areaId, không cần đồng bộ với area.devices nữa
+      // Chỉ cập nhật areaId của thiết bị
       device.areaId = areaId || null;
     }
     
@@ -197,15 +222,25 @@ const deleteDevice = async (req, res) => {
     const { deviceId } = req.params;
     const userId = req.user.id;
     
-    // Xóa thiết bị thuộc về người dùng này
-    const result = await Device.deleteOne({ deviceId, userId });
+    // Tìm thiết bị trước khi xóa
+    const device = await Device.findOne({ deviceId, userId });
     
-    if (result.deletedCount === 0) {
+    if (!device) {
       return res.status(404).json({
         success: false,
         message: "Không tìm thấy thiết bị hoặc bạn không có quyền xóa thiết bị này"
       });
     }
+    
+    // Nếu thiết bị đang liên kết với khu vực, xóa khỏi khu vực
+    if (device.areaId) {
+      await Area.findByIdAndUpdate(device.areaId, {
+        $pull: { devices: deviceId }
+      });
+    }
+    
+    // Xóa thiết bị
+    await Device.deleteOne({ deviceId, userId });
     
     res.status(200).json({
       success: true,
@@ -280,7 +315,10 @@ const linkDeviceToPlant = async (req, res) => {
       });
     }
     
-    // Kiểm tra khu vực 
+    // Lưu giá trị areaId cũ để kiểm tra sau này
+    const oldAreaId = device.areaId;
+    
+    // Kiểm tra khu vực mới
     if (areaId) {
       const area = await Area.findOne({ _id: areaId, userId });
       if (!area) {
@@ -297,6 +335,23 @@ const linkDeviceToPlant = async (req, res) => {
           message: "Cây trồng không tồn tại trong khu vực này"
         });
       }
+      
+      // Nếu thiết bị đã ở trong khu vực cũ, xóa deviceId khỏi khu vực cũ
+      if (oldAreaId && oldAreaId !== areaId) {
+        await Area.findByIdAndUpdate(oldAreaId, {
+          $pull: { devices: deviceId }
+        });
+      }
+      
+      // Thêm deviceId vào mảng devices của khu vực mới nếu chưa có
+      await Area.findByIdAndUpdate(areaId, {
+        $addToSet: { devices: deviceId }
+      });
+    } else if (oldAreaId) {
+      // Nếu areaId mới là null nhưng có areaId cũ, xóa khỏi khu vực cũ
+      await Area.findByIdAndUpdate(oldAreaId, {
+        $pull: { devices: deviceId }
+      });
     }
     
     // Cập nhật thiết bị
@@ -516,6 +571,47 @@ const getUnassignedDevices = async (req, res) => {
   }
 };
 
+const getDeviceAreaMapping = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    // Tìm tất cả thiết bị của người dùng có liên kết với khu vực
+    const devices = await Device.find({ 
+      userId, 
+      $or: [
+        { areaId: { $exists: true, $ne: null } },
+        { plantIndex: { $exists: true, $ne: null } }
+      ] 
+    });
+    
+    if (!devices || devices.length === 0) {
+      return res.status(200).json({
+        success: true,
+        mappings: [] // Trả về mảng rỗng nếu không có mapping
+      });
+    }
+    
+    // Tạo mapping từ thiết bị sang khu vực/cây trồng
+    const mappings = devices.map(device => ({
+      deviceId: device.deviceId,
+      areaId: device.areaId,
+      plantIndex: device.plantIndex !== undefined ? device.plantIndex : -1
+    })).filter(mapping => mapping.areaId); // Lọc ra các mapping có areaId
+    
+    res.status(200).json({
+      success: true,
+      mappings
+    });
+  } catch (error) {
+    console.error('Error getting device-area mappings:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error retrieving device-area mappings',
+      error: error.message
+    });
+  }
+};
+
 
 
 // Export tất cả chức năng
@@ -530,5 +626,6 @@ module.exports = {
   getDeviceData,
   processDeviceData,
   getDevicesByArea,
-  getUnassignedDevices
+  getUnassignedDevices,
+  getDeviceAreaMapping
 };
