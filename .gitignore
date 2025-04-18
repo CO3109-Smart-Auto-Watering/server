@@ -1,0 +1,11 @@
+# .gitignore
+# Các file chứa thông tin nhạy cảm
+.env
+.env.local
+.env.development
+.env.production
+
+# Các thư mục khác
+node_modules
+dist
+build
