@@ -10,11 +10,13 @@ const { initMqttClient } = require('./controllers/fetchDataController');
 // Import routes
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/user');
-const sensorDataRoutes = require('./routes/fetchData'); 
+const sensorDataRoutes = require('./routes/fetchData');
 const scheduleRoutes = require('./routes/schedule');
 const deviceRoutes = require('./routes/device');
 const reportRoutes = require('./routes/reports');
 const areaRoutes = require('./routes/area');
+const averageRouter = require('./routes/average');
+const modeRouter = require('./routes/mode');
 
 // Initialize Express app
 const app = express();
@@ -38,11 +40,14 @@ initMqttClient();
 // Use Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
-app.use('/api/sensor-data', sensorDataRoutes); 
+app.use('/api/sensor-data', sensorDataRoutes);
 app.use('/api/schedules', scheduleRoutes);
 app.use('/api/devices', deviceRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/areas', areaRoutes);
+app.use('/api/average', averageRouter);
+app.use('/api/mode', modeRouter);
+
 
 // Start server
 app.listen(PORT, () => {
