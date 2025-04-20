@@ -46,7 +46,7 @@ app.use('/api/devices', deviceRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/areas', areaRoutes);
 app.use('/api/average', averageRouter);
-app.use('/api/mode', modeRouter);
+app.use('/api/pump-motor', modeRouter);
 
 
 // Start server
