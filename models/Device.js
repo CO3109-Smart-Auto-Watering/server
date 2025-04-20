@@ -9,7 +9,6 @@ const DeviceSchema = new mongoose.Schema({
   deviceId: {
     type: String,
     required: true,
-    unique: true
   },
   deviceName: {
     type: String,
@@ -38,5 +37,8 @@ const DeviceSchema = new mongoose.Schema({
     default: Date.now
   }
 });
+
+DeviceSchema.index({ userId: 1, deviceId: 1 }, { unique: true });
+DeviceSchema.index({ userId: 1, deviceName: 1 }, { unique: true });
 
 module.exports = mongoose.model('Device', DeviceSchema);

@@ -2,6 +2,8 @@ const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const { sendPasswordResetEmail } = require('../utils/email');
 const bcrypt = require('bcryptjs');
+const multer = require('multer');
+const path = require('path');
 
 // Authentication middleware
 const authenticate = (req, res, next) => {
@@ -355,7 +357,7 @@ const getCurrentUser = async (req, res) => {
       message: 'Lỗi server', 
       error: error.message 
     });
-  }
+  } 
 };
 
 const verifyToken = async (req, res) => {
@@ -527,5 +529,5 @@ module.exports = {
   getCurrentUser,
   verifyToken,
   changePassword, 
-  updateProfile 
+  updateProfile,
 };

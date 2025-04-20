@@ -1,140 +1,251 @@
+
 const axios = require("axios");
 const mongoose = require("mongoose");
 const mqtt = require('mqtt');
 const getFeedModel = require("../models/Feed");
 const Device = require('../models/Device');
-
+const User = require('../models/User');
 
 // Adafruit API details
-const AIO_USERNAME = process.env.AIO_USERNAME;  
-const AIO_KEY = process.env.AIO_KEY; 
+const AIO_USERNAME = process.env.AIO_USERNAME;
+const AIO_KEY = process.env.AIO_KEY;
 const FEED_NAMES = ["sensor-temp", "sensor-soil", "sensor-humidity", "mode", "pump-motor"];
 
-
+// Configuration
+const MQTT_CONFIG = {
+  SAVE_FOR_ACTIVE_DEVICES_ONLY: true
+};
 
 // MQTT client instance
 let mqttClient = null;
+
+// Map để lưu thiết bị đang hoạt động (dùng làm bộ đệm)
+const activeDevices = new Map(); // userId -> deviceId
+
+// Set để theo dõi các topic đã đăng ký
+const subscribedTopics = new Set();
+
+/**
+ * Validate environment variables
+ */
+const validateEnv = () => {
+  const required = ['AIO_USERNAME', 'AIO_KEY'];
+  const missing = required.filter(key => !process.env[key]);
+  if (missing.length) {
+    throw new Error(`Missing environment variables: ${missing.join(', ')}`);
+  }
+};
+validateEnv();
 
 /**
  * Initialize MQTT client to receive real-time updates from Adafruit IO
  */
 const initMqttClient = () => {
-  // If client already exists, return it
   if (mqttClient) return mqttClient;
 
   console.log('Initializing MQTT connection to Adafruit IO...');
-  
-  // Create MQTT client
+
   mqttClient = mqtt.connect('mqtts://io.adafruit.com', {
     username: AIO_USERNAME,
     password: AIO_KEY,
-    reconnectPeriod: 5000 // Reconnect after 5 seconds if connection lost
+    reconnectPeriod: 5000
   });
-  
-  // Handle connection
+
   mqttClient.on('connect', () => {
     console.log('Connected to Adafruit IO MQTT');
-    
-    // Subscribe to all feed topics
-    FEED_NAMES.forEach(feedName => {
+
+    // Loại bỏ trùng lặp trong FEED_NAMES
+    const uniqueFeedNames = [...new Set(FEED_NAMES)];
+
+    uniqueFeedNames.forEach(feedName => {
       const topic = `${AIO_USERNAME}/feeds/${feedName}`;
-      mqttClient.subscribe(topic, (err) => {
-        if (!err) {
-          console.log(`Subscribed to ${topic}`);
-        } else {
-          console.error(`Error subscribing to ${topic}:`, err);
-        }
-      });
+      if (!subscribedTopics.has(topic)) {
+        mqttClient.subscribe(topic, (err) => {
+          if (!err) {
+            console.log(`Subscribed to ${topic}`);
+            subscribedTopics.add(topic);
+          } else {
+            console.error(`Error subscribing to ${topic}:`, err);
+          }
+        });
+      } else {
+        console.log(`Already subscribed to ${topic}, skipping.`);
+      }
     });
   });
-  
-  // Handle incoming messages
+
   mqttClient.on('message', async (topic, message) => {
     try {
-      // Extract feed name from topic (format: username/feeds/feedname)
       const feedName = topic.split('/').pop();
-      const value = message.toString();
-      
-      console.log(`MQTT: Received update from ${feedName}: ${value}`);
-      
-      // Tìm thiết bị có feed này
-      const device = await Device.findOne({ feeds: { $in: [feedName] } });
-      
-      // Lấy deviceId từ database, không phải từ giá trị tin nhắn
-      const deviceId = device ? device.deviceId : 'unknown';
-      const userId = device ? device.userId : null;
-      
-      // Create feed model and save data
+      const rawMessage = message.toString();
+      let value = rawMessage;
+      let deviceId = null;
+
+      // Chỉ parse JSON nếu message bắt đầu bằng '{'
+      if (rawMessage.trim().startsWith('{')) {
+        try {
+          const parsed = JSON.parse(rawMessage);
+          console.log(`MQTT: Raw JSON payload:`, parsed);
+          deviceId = parsed.deviceId;
+          value = parsed.value;
+          console.log(`MQTT: Parsed JSON - deviceId: ${deviceId}, value: ${value}`);
+        } catch (e) {
+          console.log(`MQTT: Failed to parse JSON, using raw value: ${rawMessage}`);
+          value = rawMessage; // Giữ nguyên rawMessage nếu parse thất bại
+        }
+      } else {
+        console.log(`MQTT: Message is not JSON, using raw value: ${rawMessage}`);
+      }
+
+      // Validate value
+      if (value === undefined || value === null) {
+        console.warn(`MQTT: Invalid value for feed ${feedName}: ${value}. Skipping save. Raw message: ${rawMessage}`);
+        return;
+      }
+
+      console.log(`MQTT: Received update from ${feedName}: ${value}${deviceId ? ` (deviceId: ${deviceId})` : ''}`);
+      console.log(`MQTT: Raw message: ${rawMessage}`);
+
+      // Tìm tất cả thiết bị có feed này
+      const devices = await Device.find({ feeds: { $in: [feedName] } });
+      console.log(`MQTT: Devices found for feed ${feedName}:`, devices.map(d => ({
+        deviceId: d.deviceId,
+        userId: d.userId.toString(),
+        feeds: d.feeds
+      })));
+
+      if (devices.length === 0) {
+        console.warn(`MQTT: No device found for feed ${feedName}`);
+        return;
+      }
+
+      let targetDevice = null;
+
+      // Nếu có deviceId trong payload, kiểm tra thiết bị
+      if (deviceId) {
+        targetDevice = devices.find(d => d.deviceId === deviceId);
+        if (!targetDevice) {
+          console.warn(`MQTT: Device ${deviceId} not found for feed ${feedName}`);
+          return;
+        }
+        // Luôn kiểm tra activeDeviceId từ MongoDB
+        const user = await User.findById(targetDevice.userId).select('activeDeviceId');
+        if (!user || user.activeDeviceId !== deviceId) {
+          console.warn(
+            `MQTT: Device ${deviceId} is not the active device for user ${targetDevice.userId}. Active device: ${user?.activeDeviceId || 'none'}`
+          );
+          return;
+        }
+      } else {
+        // Kiểm tra activeDeviceId từ MongoDB
+        for (const device of devices) {
+          const userId = device.userId.toString();
+          const user = await User.findById(userId).select('activeDeviceId');
+          const activeDeviceId = user?.activeDeviceId;
+
+          console.log(`MQTT: Checking user ${userId}, activeDeviceId: ${activeDeviceId || 'none'}`);
+
+          if (activeDeviceId && activeDeviceId === device.deviceId) {
+            targetDevice = device;
+            break;
+          }
+        }
+
+        // Nếu không tìm thấy thiết bị hoạt động
+        if (!targetDevice) {
+          console.warn(
+            `MQTT: No active device found for feed ${feedName}. Data not saved.`
+          );
+          return;
+        }
+      }
+
+      console.log(`MQTT: Selected targetDevice:`, {
+        deviceId: targetDevice.deviceId,
+        userId: targetDevice.userId.toString()
+      });
+
+      // Lưu dữ liệu
       const FeedModel = getFeedModel(feedName);
-      await FeedModel.create({
-        userId: userId,
-        deviceId: deviceId,
-        value: value, // Sử dụng giá trị trực tiếp
+      const savedData = await FeedModel.create({
+        userId: targetDevice.userId,
+        deviceId: targetDevice.deviceId,
+        value: value.toString(),
         feedType: feedName,
         createdAt: new Date()
       });
-      
-      const userInfo = userId ? `for user ${userId}` : "(unassociated)";
-      console.log(`MQTT: Saved ${feedName} data ${userInfo} for device ${deviceId} (value: ${value})`);
+
+      console.log(
+        `MQTT: Saved ${feedName} data for device ${targetDevice.deviceId} (user: ${targetDevice.userId}, value: ${value}, savedId: ${savedData._id})`
+      );
+
+      // Kiểm tra bản ghi vừa lưu
+      const latestRecord = await FeedModel.findOne({ _id: savedData._id });
+      console.log(`MQTT: Latest saved record:`, latestRecord);
     } catch (error) {
-      console.error('Error handling MQTT message:', error);
+      console.error('MQTT: Error handling message:', error);
     }
   });
-  
-  // Handle connection errors
+
   mqttClient.on('error', (err) => {
     console.error('MQTT Client error:', err);
   });
-  
+
   mqttClient.on('offline', () => {
     console.warn('MQTT Client disconnected');
   });
-  
+
   return mqttClient;
 };
 
 /**
- * Function to fetch data from Adafruit and save to database
+ * Fetch data from Adafruit and save to database
  */
-
-const fetchData = async (deviceId = null) => {
+const fetchData = async (deviceId = null, userId = null) => {
   const results = {};
-  
+
   try {
-    if (!AIO_USERNAME || !AIO_KEY) {
-      throw new Error("Missing Adafruit IO credentials in environment variables");
-    }
-    
-    // Nếu có deviceId, tìm thiết bị để lấy feeds
     let deviceFeeds = FEED_NAMES;
     let device = null;
-    
+
     if (deviceId) {
       device = await Device.findOne({ deviceId });
-      if (device && device.feeds) {
+      if (!device) {
+        throw new Error(`Device ${deviceId} not found`);
+      }
+      if (device.feeds) {
         deviceFeeds = device.feeds;
       }
+
+      if (userId && MQTT_CONFIG.SAVE_FOR_ACTIVE_DEVICES_ONLY) {
+        const user = await User.findById(userId).select('activeDeviceId');
+        const activeDeviceId = user?.activeDeviceId;
+        if (activeDeviceId !== deviceId) {
+          console.warn(
+            `fetchData: Skipping data save for non-active device ${deviceId} (active: ${activeDeviceId || 'none'})`
+          );
+          return { skipped: true, reason: "Not active device", deviceId };
+        }
+      }
     }
-    
+
     for (const feedName of deviceFeeds) {
       try {
         const url = `https://io.adafruit.com/api/v2/${AIO_USERNAME}/feeds/${feedName}/data?limit=1`;
-        
         const response = await axios.get(url, {
-          headers: { "X-AIO-Key": AIO_KEY },
+          headers: { "X-AIO-Key": AIO_KEY }
         });
 
         if (response.data.length > 0) {
           const latestData = response.data[0];
           const FeedModel = getFeedModel(feedName);
 
-          // Save data to the corresponding collection with deviceId
           const savedData = await FeedModel.create({
             deviceId: deviceId || 'unknown',
             userId: device ? device.userId : null,
-            value: latestData.value,
+            value: latestData.value.toString(),
             feedType: feedName,
-            createdAt: new Date(latestData.created_at),
+            createdAt: new Date(latestData.created_at)
           });
 
           results[feedName] = {
@@ -143,31 +254,34 @@ const fetchData = async (deviceId = null) => {
             deviceId: deviceId,
             savedId: savedData._id
           };
-          
-          console.log(`Data saved to ${feedName} collection for device ${deviceId || 'unknown'}:`, latestData.value);
+
+          console.log(
+            `fetchData: Saved ${feedName} data for device ${deviceId || 'unknown'}: ${latestData.value}`
+          );
         } else {
           results[feedName] = { success: false, error: "No data found" };
         }
       } catch (feedError) {
-        console.error(`Error fetching data for ${feedName}:`, feedError.message);
+        console.error(`fetchData: Error fetching data for ${feedName}:`, feedError.message);
         results[feedName] = { success: false, error: feedError.message };
       }
     }
-    
+
     return results;
   } catch (error) {
-    console.error("Error in fetch operation:", error.message);
+    console.error("fetchData: Error in fetch operation:", error.message);
     throw error;
   }
 };
 
-
+/**
+ * Controller to fetch data from Adafruit
+ */
 const fetchDataFromAdafruit = async (req, res) => {
   try {
     const userId = req.user.id;
     const { deviceId } = req.query;
-    
-    // Kiểm tra quyền nếu có deviceId
+
     if (deviceId) {
       const device = await Device.findOne({ deviceId, userId });
       if (!device) {
@@ -176,9 +290,17 @@ const fetchDataFromAdafruit = async (req, res) => {
           message: 'Thiết bị không tồn tại hoặc bạn không có quyền truy cập'
         });
       }
+
+      const user = await User.findById(userId).select('activeDeviceId');
+      if (MQTT_CONFIG.SAVE_FOR_ACTIVE_DEVICES_ONLY && user?.activeDeviceId !== deviceId) {
+        return res.status(403).json({
+          success: false,
+          message: `Chỉ có thể lấy dữ liệu cho thiết bị đang hoạt động (${user?.activeDeviceId || 'chưa thiết lập'})`
+        });
+      }
     }
-    
-    const results = await fetchData(deviceId);
+
+    const results = await fetchData(deviceId, userId);
     res.status(200).json({
       success: true,
       message: `Data fetched and saved successfully ${deviceId ? 'for device ' + deviceId : ''}`,
@@ -186,7 +308,7 @@ const fetchDataFromAdafruit = async (req, res) => {
       results
     });
   } catch (error) {
-    console.error('Error in fetch endpoint:', error);
+    console.error('fetchDataFromAdafruit: Error:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch data',
@@ -202,10 +324,8 @@ const getLatestData = async (req, res) => {
   try {
     const userId = req.user.id;
     const results = {};
-    
-    // Get user's devices and their feeds
-    const userDevices = await Device.find({ userId });
 
+    const userDevices = await Device.find({ userId });
     if (!userDevices || userDevices.length === 0) {
       return res.status(200).json({
         success: true,
@@ -215,30 +335,23 @@ const getLatestData = async (req, res) => {
     }
 
     const userFeeds = new Set(userDevices.flatMap(device => device.feeds));
-    
-    
-    // Get latest entry from each feed collection
+
     for (const feedName of Array.from(userFeeds)) {
       const FeedModel = getFeedModel(feedName);
-      const query = { userId };
-      
-      const latestEntry = await FeedModel.findOne(query)
+      const latestEntry = await FeedModel.findOne({ userId })
         .sort({ createdAt: -1 })
         .limit(1);
-      
-      if (latestEntry) {
-        results[feedName] = {
-          value: latestEntry.value,
-          timestamp: latestEntry.createdAt
-        };
-      } else {
-        results[feedName] = { value: null, timestamp: null };
-      }
+
+      results[feedName] = latestEntry ? {
+        value: latestEntry.value,
+        timestamp: latestEntry.createdAt,
+        deviceId: latestEntry.deviceId
+      } : { value: null, timestamp: null, deviceId: null };
     }
-    
+
     res.status(200).json({ success: true, data: results });
   } catch (error) {
-    console.error('Error fetching latest data:', error);
+    console.error('getLatestData: Error:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch latest data',
@@ -261,37 +374,40 @@ const sendCommand = async (req, res) => {
         message: 'Missing required parameters: feedName and value'
       });
     }
-    
-    // Check if feedName is valid
+
     if (!FEED_NAMES.includes(feedName)) {
       return res.status(400).json({
         success: false,
         message: 'Invalid feed name'
       });
     }
-    
-    // Kiểm tra thiết bị nếu có deviceId
+
     if (deviceId) {
       const device = await Device.findOne({ deviceId, userId });
-      
       if (!device) {
         return res.status(403).json({
           success: false,
           message: 'Thiết bị không tồn tại hoặc bạn không có quyền truy cập'
         });
       }
-      
+
       if (!device.feeds.includes(feedName)) {
         return res.status(400).json({
           success: false,
           message: `Thiết bị này không hỗ trợ ${feedName}`
         });
       }
+
+      const user = await User.findById(userId).select('activeDeviceId');
+      if (MQTT_CONFIG.SAVE_FOR_ACTIVE_DEVICES_ONLY && user?.activeDeviceId !== deviceId) {
+        return res.status(403).json({
+          success: false,
+          message: `Chỉ có thể gửi lệnh cho thiết bị đang hoạt động (${user?.activeDeviceId || 'chưa thiết lập'})`
+        });
+      }
     } else {
-      // Kiểm tra xem người dùng có quyền sử dụng feed này không
       const userDevices = await Device.find({ userId });
       const userHasAccess = userDevices.some(device => device.feeds.includes(feedName));
-      
       if (!userHasAccess) {
         return res.status(403).json({
           success: false,
@@ -299,35 +415,22 @@ const sendCommand = async (req, res) => {
         });
       }
     }
-    
-    // Định dạng giá trị nếu có deviceId
-    const commandValue = deviceId ? `${deviceId}:${value}` : value.toString();
-    
-    // Send the command to Adafruit
+
+    const commandValue = value.toString();
     const url = `https://io.adafruit.com/api/v2/${AIO_USERNAME}/feeds/${feedName}/data`;
     const response = await axios.post(url, 
       { value: commandValue },
       { headers: { "X-AIO-Key": AIO_KEY } }
     );
-    
-    // Lưu lại lệnh đã gửi
-    const FeedModel = getFeedModel(feedName);
-    await FeedModel.create({
-      userId,
-      deviceId: deviceId || 'unknown',
-      feedType: feedName,
-      value: value.toString(),
-      createdAt: new Date()
-    });
-    
+
+
     res.status(200).json({
       success: true,
       message: `Command sent to ${feedName} ${deviceId ? 'for device ' + deviceId : ''} successfully`,
-      adafruitResponse: response.data,
+      adafruitResponse: response.data
     });
-    
   } catch (error) {
-    console.error('Error sending command:', error);
+    console.error('sendCommand: Error:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to send command',
@@ -336,25 +439,25 @@ const sendCommand = async (req, res) => {
   }
 };
 
+/**
+ * Controller to get historical data
+ */
 const getHistoricalData = async (req, res) => {
   try {
     const userId = req.user.id;
     const { feedName } = req.params;
-    const { deviceId } = req.query;
-    const limit = parseInt(req.query.limit) || 24; // Default to 24 entries
-    
-    // Validate the feed name
+    const deviceId = req.params.deviceId || req.query.deviceId;
+    const limit = parseInt(req.query.limit) || 24;
+
     if (!FEED_NAMES.includes(feedName)) {
       return res.status(404).json({
         success: false,
         message: `Feed ${feedName} not found`
       });
     }
-    
-    // Xây dựng query filters
+
     const filters = { userId };
-    
-    // Nếu có deviceId, kiểm tra và thêm vào filters
+
     if (deviceId) {
       const device = await Device.findOne({ deviceId, userId });
       if (!device) {
@@ -363,20 +466,18 @@ const getHistoricalData = async (req, res) => {
           message: 'Thiết bị không tồn tại hoặc bạn không có quyền truy cập'
         });
       }
-      
+
       if (!device.feeds.includes(feedName)) {
         return res.status(400).json({
           success: false,
           message: `Thiết bị này không hỗ trợ ${feedName}`
         });
       }
-      
+
       filters.deviceId = deviceId;
     } else {
-      // Kiểm tra xem user có thiết bị nào hỗ trợ feed này không
       const userDevices = await Device.find({ userId });
       const userHasFeed = userDevices.some(device => device.feeds.includes(feedName));
-      
       if (!userHasFeed) {
         return res.status(200).json({
           success: true,
@@ -386,16 +487,13 @@ const getHistoricalData = async (req, res) => {
         });
       }
     }
-    
-    // Get the feed model
-    const FeedModel = getFeedModel(feedName);
 
-    // Query for historical data with filters
+    const FeedModel = getFeedModel(feedName);
     const historicalData = await FeedModel.find(filters)
       .sort({ createdAt: -1 })
       .limit(limit)
       .select('deviceId value createdAt');
-    
+
     res.status(200).json({
       success: true,
       deviceId: deviceId || null,
@@ -403,7 +501,7 @@ const getHistoricalData = async (req, res) => {
       data: historicalData
     });
   } catch (error) {
-    console.error(`Error fetching historical data for ${req.params.feedName}:`, error);
+    console.error(`getHistoricalData: Error for ${req.params.feedName}:`, error);
     res.status(500).json({
       success: false,
       message: 'Error fetching historical data',
@@ -413,34 +511,29 @@ const getHistoricalData = async (req, res) => {
 };
 
 /**
- * Get all data for a specific device
+ * Controller to get all data for a specific device
  */
 const getDeviceData = async (req, res) => {
   try {
     const userId = req.user.id;
     const { deviceId } = req.params;
-    
-    // Kiểm tra xem thiết bị có thuộc về người dùng không
+
     const device = await Device.findOne({ deviceId, userId });
-    
     if (!device) {
       return res.status(404).json({
         success: false,
         message: 'Thiết bị không tồn tại hoặc không thuộc về bạn'
       });
     }
-    
-    // Kết quả sẽ chứa dữ liệu từ tất cả feed của thiết bị
+
     const results = [];
-    
-    // Lấy dữ liệu cho mỗi feed của thiết bị
+
     for (const feedName of device.feeds) {
       const FeedModel = getFeedModel(feedName);
-      
       const feedData = await FeedModel.find({ deviceId })
         .sort({ createdAt: -1 })
         .limit(20);
-      
+
       if (feedData && feedData.length > 0) {
         feedData.forEach(data => {
           results.push({
@@ -452,10 +545,9 @@ const getDeviceData = async (req, res) => {
         });
       }
     }
-    
-    // Sắp xếp kết quả theo thời gian giảm dần
+
     results.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-    
+
     res.status(200).json({
       success: true,
       device: {
@@ -466,7 +558,7 @@ const getDeviceData = async (req, res) => {
       data: results
     });
   } catch (error) {
-    console.error('Error fetching device data:', error);
+    console.error('getDeviceData: Error:', error);
     res.status(500).json({
       success: false,
       message: 'Lỗi khi lấy dữ liệu thiết bị',
@@ -476,37 +568,33 @@ const getDeviceData = async (req, res) => {
 };
 
 /**
- * Get latest soil moisture data for a device
+ * Controller to get latest soil moisture data
  */
 const getLatestMoisture = async (req, res) => {
   try {
     const userId = req.user.id;
     const { deviceId } = req.params;
-    
-    // Kiểm tra xem thiết bị có thuộc về người dùng không
+
     const device = await Device.findOne({ deviceId, userId });
-    
     if (!device) {
       return res.status(404).json({
         success: false,
         message: 'Thiết bị không tồn tại hoặc không thuộc về bạn'
       });
     }
-    
-    // Kiểm tra xem thiết bị có cảm biến độ ẩm đất không
+
     if (!device.feeds.includes('sensor-soil')) {
       return res.status(400).json({
         success: false,
         message: 'Thiết bị không có cảm biến độ ẩm đất'
       });
     }
-    
-    // Lấy dữ liệu độ ẩm đất mới nhất
+
     const SoilModel = getFeedModel('sensor-soil');
     const latestMoisture = await SoilModel.findOne({ deviceId })
       .sort({ createdAt: -1 })
       .limit(1);
-    
+
     if (!latestMoisture) {
       return res.status(200).json({
         success: true,
@@ -514,7 +602,7 @@ const getLatestMoisture = async (req, res) => {
         moisture: null
       });
     }
-    
+
     res.status(200).json({
       success: true,
       moisture: {
@@ -523,7 +611,7 @@ const getLatestMoisture = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error fetching latest moisture:', error);
+    console.error('getLatestMoisture: Error:', error);
     res.status(500).json({
       success: false,
       message: 'Lỗi khi lấy dữ liệu độ ẩm đất',
@@ -532,49 +620,43 @@ const getLatestMoisture = async (req, res) => {
   }
 };
 
-
+/**
+ * Controller to get single feed data
+ */
 const getSingleFeedData = async (req, res) => {
   try {
     const { feedName } = req.params;
-    
-    // Lấy userId từ thông tin xác thực
     const userId = req.user.id;
-    
-    // Kiểm tra feed name hợp lệ
-    const validFeeds = ['sensor-temp', 'sensor-humidity', 'sensor-soil', 'pump-motor', 'mode'];
-    if (!validFeeds.includes(feedName)) {
+
+    if (!FEED_NAMES.includes(feedName)) {
       return res.status(400).json({
         success: false,
         message: 'Invalid feed name'
       });
     }
-    
-    // Sử dụng getFeedModel thay vì SensorData
+
     const FeedModel = getFeedModel(feedName);
-    
-    // Lấy dữ liệu mới nhất của feed từ database
-    const data = await FeedModel.findOne({ 
-      userId 
-    }).sort({ createdAt: -1 }); // Sort theo createdAt không phải timestamp
-    
+    const data = await FeedModel.findOne({ userId })
+      .sort({ createdAt: -1 });
+
     if (!data) {
       return res.status(404).json({
         success: false,
-        feedName: feedName,
+        feedName,
         message: 'No data found for this feed'
       });
     }
-    
-    return res.status(200).json({
+
+    res.status(200).json({
       success: true,
       feedName,
       value: data.value,
-      timestamp: data.createdAt // Trả về createdAt thay vì timestamp
+      timestamp: data.createdAt,
+      deviceId: data.deviceId
     });
-    
   } catch (error) {
-    console.error('Error fetching feed data:', error);
-    return res.status(500).json({
+    console.error('getSingleFeedData: Error:', error);
+    res.status(500).json({
       success: false,
       message: 'Error fetching feed data',
       error: error.message
@@ -582,16 +664,177 @@ const getSingleFeedData = async (req, res) => {
   }
 };
 
+/**
+ * Controller to get feed value for a device
+ */
+const getDeviceFeedValue = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { deviceId, feedName } = req.params;
 
+    if (!FEED_NAMES.includes(feedName)) {
+      return res.status(400).json({
+        success: false,
+        message: `Feed không hợp lệ: ${feedName}`
+      });
+    }
 
+    const device = await Device.findOne({ deviceId, userId });
+    if (!device) {
+      return res.status(404).json({
+        success: false,
+        message: 'Thiết bị không tồn tại hoặc không thuộc về bạn'
+      });
+    }
+
+    if (!device.feeds.includes(feedName)) {
+      return res.status(400).json({
+        success: false,
+        message: `Thiết bị không hỗ trợ ${feedName}`
+      });
+    }
+
+    const FeedModel = getFeedModel(feedName);
+    const latestValue = await FeedModel.findOne({ deviceId })
+      .sort({ createdAt: -1 })
+      .limit(1);
+
+    if (!latestValue) {
+      return res.status(200).json({
+        success: true,
+        value: null,
+        message: 'Chưa có dữ liệu cho feed này'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      deviceId,
+      feedName,
+      value: latestValue.value,
+      timestamp: latestValue.createdAt
+    });
+  } catch (error) {
+    console.error('getDeviceFeedValue: Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lỗi khi lấy giá trị feed',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Controller to set active device
+ */
+const setActiveDevice = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { deviceId } = req.body;
+
+    if (!deviceId) {
+      return res.status(400).json({
+        success: false,
+        message: 'deviceId là bắt buộc'
+      });
+    }
+
+    const device = await Device.findOne({ deviceId, userId });
+    if (!device) {
+      return res.status(404).json({
+        success: false,
+        message: 'Thiết bị không tồn tại hoặc không thuộc về bạn'
+      });
+    }
+
+    // Lấy thiết bị hoạt động trước đó từ MongoDB
+    const user = await User.findById(userId).select('activeDeviceId');
+    const previousDeviceId = user?.activeDeviceId;
+
+    // Cập nhật activeDeviceId trong MongoDB
+    await User.updateOne({ _id: userId }, { activeDeviceId: deviceId });
+
+    // Cập nhật activeDevices Map
+    activeDevices.set(userId.toString(), deviceId);
+
+    console.log(
+      `setActiveDevice: User ${userId} set active device: ${deviceId}` +
+      (previousDeviceId ? ` (previous: ${previousDeviceId})` : '')
+    );
+    console.log(`setActiveDevice: Current activeDevices:`, [...activeDevices.entries()]);
+
+    // Đợi ngắn để đảm bảo MongoDB cập nhật
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    res.status(200).json({
+      success: true,
+      message: `Đã thiết lập ${deviceId} làm thiết bị hoạt động`,
+      deviceId,
+      previousDeviceId,
+      activeCount: activeDevices.size
+    });
+  } catch (error) {
+    console.error('setActiveDevice: Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lỗi khi thiết lập thiết bị hoạt động',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Controller to get active device
+ */
+const getActiveDevice = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const user = await User.findById(userId).select('activeDeviceId');
+    const activeDeviceId = user?.activeDeviceId;
+
+    if (!activeDeviceId) {
+      return res.status(200).json({
+        success: true,
+        message: 'Chưa có thiết bị hoạt động nào được thiết lập',
+        deviceId: null
+      });
+    }
+
+    const device = await Device.findOne({ deviceId: activeDeviceId, userId });
+    if (!device) {
+      return res.status(404).json({
+        success: false,
+        message: 'Thiết bị hoạt động không tồn tại hoặc không thuộc về bạn'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      deviceId: activeDeviceId,
+      deviceName: device.deviceName,
+      feeds: device.feeds
+    });
+  } catch (error) {
+    console.error('getActiveDevice: Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lỗi khi lấy thông tin thiết bị hoạt động',
+      error: error.message
+    });
+  }
+};
 
 module.exports = {
-  fetchData,              // Original function for internal use
-  fetchDataFromAdafruit,  // Controller for /fetch route
-  getLatestData,          // Controller for /latest route
-  sendCommand,          // Controller for /command route
-  initMqttClient,          // Function to initialize MQTT client
-  getHistoricalData,        // Controller for /history route
-  getDeviceData,          // Controller for /device/:deviceId route
-  getSingleFeedData      // Controller for /feed/:feedName route
+  fetchData,
+  fetchDataFromAdafruit,
+  getLatestData,
+  sendCommand,
+  initMqttClient,
+  getHistoricalData,
+  getDeviceData,
+  getSingleFeedData,
+  getLatestMoisture,
+  getDeviceFeedValue,
+  setActiveDevice,
+  getActiveDevice
 };

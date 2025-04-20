@@ -24,6 +24,7 @@ const PORT = process.env.PORT || 5000;
 app.use(bodyParser.json());
 app.use(cors());
 
+
 // Connect to MongoDB
 mongoose.connect(process.env.MONGO_URI)
   .then(() => {
@@ -33,7 +34,6 @@ mongoose.connect(process.env.MONGO_URI)
 
 // Initialize MQTT client for real-time updates from Adafruit IO
 initMqttClient();
-
 
 // Use Routes
 app.use('/api/auth', authRoutes);

@@ -8,11 +8,36 @@ const userSchema = new mongoose.Schema({
     unique: true,
     trim: true
   },
+  name:{
+    type: String,
+    required: false,
+    trim: true
+  },
+  phone: {
+    type: String,
+    required: false,
+    trim: true
+  },
   email: {
     type: String,
     required: true,
     unique: true,
     trim: true
+  },
+  avatar:{
+    type: String,
+    required: false,
+    default: 'https://res.cloudinary.com/dqj0xg3zv/image/upload/v1698236482/avatars/default-avatar.png'
+  },
+  preferences: {
+    notifyWatering:{
+      type: Boolean,
+      default: true
+    },
+    notifySystem:{
+      type: Boolean,
+      default: true
+    },
   },
   password: {
     type: String,
@@ -22,6 +47,10 @@ const userSchema = new mongoose.Schema({
     type: String,
     enum: ['user', 'admin'],
     default: 'user'
+  },
+  activeDeviceId: {
+     type: String, 
+     default: null 
   },
   resetPasswordToken: String,
   resetPasswordExpires: Date,

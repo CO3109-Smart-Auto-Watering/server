@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+
 const { 
   login, 
   register, 
@@ -10,7 +11,7 @@ const {
   authenticate,
   verifyToken,
   changePassword,
-  updateProfile
+  updateProfile,
 } = require('../controllers/authController');
 
 // Public routes
@@ -23,6 +24,5 @@ router.post('/verify', authenticate, verifyToken);
 router.get('/me', authenticate, getCurrentUser);
 router.put('/change-password', authenticate, changePassword);
 router.put('/profile', authenticate, updateProfile); 
-
 
 module.exports = router;

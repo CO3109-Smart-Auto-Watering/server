@@ -40,6 +40,7 @@ const registerDevice = async (req, res) => {
       await Area.findByIdAndUpdate(areaId, {
         $addToSet: { devices: deviceId }
       });
+
     }
     
     // Tạo thiết bị mới
@@ -49,7 +50,7 @@ const registerDevice = async (req, res) => {
       deviceName,
       feeds,
       areaId: areaId || null,
-      plantIndex: plantIndex || -1
+      plantIndex: areaId ? plantIndex : -1
     });
     
     await device.save();
@@ -344,9 +345,10 @@ const linkDeviceToPlant = async (req, res) => {
       }
       
       // Thêm deviceId vào mảng devices của khu vực mới nếu chưa có
-      await Area.findByIdAndUpdate(areaId, {
-        $addToSet: { devices: deviceId }
-      });
+      await Area.findOneAndUpdate(
+        { _id: areaId, "plants._id": area.plants[plantIndex]._id },
+        { $set: { "plants.$.deviceId": deviceId } }
+      );
     } else if (oldAreaId) {
       // Nếu areaId mới là null nhưng có areaId cũ, xóa khỏi khu vực cũ
       await Area.findByIdAndUpdate(oldAreaId, {
